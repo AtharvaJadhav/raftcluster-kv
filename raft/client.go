@@ -21,10 +21,23 @@ type DistributedClient struct {
 
 // NewDistributedClient creates a new DistributedClient with the given node addresses
 func NewDistributedClient(nodeAddresses []string) *DistributedClient {
+	// Create custom transport with connection pooling
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
+	// Create HTTP client with custom transport and timeout
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   1 * time.Second,
+	}
+
 	return &DistributedClient{
 		nodeAddresses:      nodeAddresses,
 		leaderCache:        make(map[int]string),
-		httpClient:         &http.Client{Timeout: 1 * time.Second},
+		httpClient:         httpClient,
 		concurrentRequests: 2000,
 		semaphore:          make(chan struct{}, 2000),
 	}
