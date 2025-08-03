@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -140,4 +141,42 @@ func TestPerformance(t *testing.T) {
 	fmt.Printf("Total operations: %d\n", numOperations)
 	fmt.Printf("Total time: %v\n", duration)
 	fmt.Printf("Achieved %.2f QPS\n", qps)
+}
+
+func TestCrossShardGet(t *testing.T) {
+	// Set up 3 ShardedNodes on different ports
+	nodeIDs := []string{"node1", "node2", "node3"}
+	ports := []string{"9080", "9081", "9082"}
+
+	// Create ShardedNodes
+	nodes := make([]*raft.ShardedNode, 3)
+	for i := 0; i < 3; i++ {
+		nodes[i] = raft.NewShardedNode(nodeIDs[i], nodeIDs)
+		nodes[i].StartHTTPServer(ports[i])
+	}
+
+	// Give time for servers to start
+	time.Sleep(1 * time.Second)
+
+	// Manually set states for testing - make each node leader for one shard
+	for i := 0; i < 3; i++ {
+		shard := nodes[i].GetShard(i)
+		if shard != nil {
+			shard.SetState(raft.Leader)
+		}
+	}
+
+	// Make HTTP GET request to the cross-shard endpoint
+	resp, err := http.Get("http://localhost:9080/cross-shard-get?keys=key1,key2,key3")
+	if err != nil {
+		t.Fatalf("HTTP request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check that the response status is 200
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	fmt.Println("Cross-shard coordination test passed!")
 }

@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -32,10 +33,11 @@ func GetShardForKey(key string) int {
 // ShardedNode represents a node that manages multiple Raft groups (shards)
 // Each physical node runs one ShardedNode, which internally runs NumShards RaftNode instances
 type ShardedNode struct {
-	nodeID     string               // This node's identifier
-	shards     [NumShards]*RaftNode // Array of RaftNode pointers, one per shard
-	httpServer *http.Server         // HTTP server for client communication
-	mu         sync.RWMutex         // Mutex for thread safety
+	nodeID      string                  // This node's identifier
+	shards      [NumShards]*RaftNode    // Array of RaftNode pointers, one per shard
+	httpServer  *http.Server            // HTTP server for client communication
+	coordinator *TransactionCoordinator // Cross-shard transaction coordinator
+	mu          sync.RWMutex            // Mutex for thread safety
 }
 
 // NewShardedNode creates a new ShardedNode with NumShards RaftNode instances
@@ -61,6 +63,9 @@ func NewShardedNode(nodeID string, allNodeIDs []string) *ShardedNode {
 		shardNodeID := nodeID + "-shard" + fmt.Sprintf("%d", shardID)
 		shardedNode.shards[shardID] = NewRaftNode(shardNodeID, shardPeerIDs)
 	}
+
+	// Initialize the transaction coordinator
+	shardedNode.coordinator = NewTransactionCoordinator(nodeID, shardedNode)
 
 	return shardedNode
 }
@@ -214,13 +219,51 @@ func (sn *ShardedNode) handlePut(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleCrossShardGet handles HTTP GET requests to the /cross-shard-get endpoint
+// Expects a "keys" query parameter with comma-separated keys
+// Demonstrates cross-shard coordination with global sequence numbering
+func (sn *ShardedNode) handleCrossShardGet(w http.ResponseWriter, r *http.Request) {
+	// Check for required "keys" parameter
+	keysParam := r.URL.Query().Get("keys")
+	if keysParam == "" {
+		http.Error(w, "missing required 'keys' parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Parse comma-separated keys
+	var keys []string
+	for _, key := range strings.Split(keysParam, ",") {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+
+	if len(keys) == 0 {
+		http.Error(w, "no valid keys provided", http.StatusBadRequest)
+		return
+	}
+
+	// Use the transaction coordinator to perform multi-shard read
+	result, err := sn.coordinator.MultiShardGet(keys)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("cross-shard read failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return the result as JSON
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 // StartHTTPServer starts an HTTP server on the given port
-// Sets up the /leaders, /get, and /put endpoints and starts the server in a goroutine
+// Sets up the /leaders, /get, /put, and /cross-shard-get endpoints and starts the server in a goroutine
 func (sn *ShardedNode) StartHTTPServer(port string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/leaders", sn.handleLeaders)
 	mux.HandleFunc("/get", sn.handleGet)
 	mux.HandleFunc("/put", sn.handlePut)
+	mux.HandleFunc("/cross-shard-get", sn.handleCrossShardGet)
 
 	sn.httpServer = &http.Server{
 		Addr:    ":" + port,
